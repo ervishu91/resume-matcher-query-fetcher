@@ -1,10 +1,10 @@
 # AI-Powered Resume Matching System
 
-A Java Spring Boot application that matches resumes against job descriptions using **text embeddings and cosine similarity**.
+A Java Spring Boot application that matches resumes against job descriptions using **text embeddings and Qdrant vector search with cosine similarity**.
 
 The application extracts information from PDF resumes, divides resume content into meaningful chunks, generates embeddings using a locally hosted embedding model, and ranks resume sections by their semantic similarity to a given job description.
 
-The project is being developed incrementally, starting with semantic matching and moving toward persistent storage and LLM-powered candidate evaluation.
+The project is being developed incrementally. Semantic retrieval now uses Qdrant for persistent vector storage, while further cleanup is planned to remove redundant in-memory state, handle duplicate uploads, and improve candidate-level ranking.
 
 ## Features
 
@@ -14,18 +14,20 @@ The project is being developed incrementally, starting with semantic matching an
 - **Text Normalization** — Normalize extracted text before processing.
 - **Resume Chunking** — Divide resume content into sections such as summary, skills, work experience, and education.
 - **Candidate Profile Extraction** — Extract candidate information, including name, email, phone number, experience, and skills.
-- **Embedding Generation** — Generate vector embeddings using Ollama and `nomic-embed-text`.
-- **Semantic Matching** — Compare job descriptions against resume chunks using cosine similarity.
-- **Ranked Results** — Return the most relevant resume sections in descending order of similarity.
+- **Embedding Generation** — Generate 768-dimensional vector embeddings using Ollama and `nomic-embed-text`.
+- **Qdrant Vector Database** — Run Qdrant locally and create `resume_chunks` and `candidate_profiles` collections using cosine distance.
+- **Persistent Chunk Storage** — Store resume-chunk vectors and payload fields (`resumeId`, `chunkIndex`, `section`, and `text`) in Qdrant.
+- **Vector Search** — Search Qdrant using the job-description embedding and return ranked chunks with similarity scores.
+- **Persistent Candidate Profiles** — Store serialized candidate profiles in Qdrant and retrieve them by deterministic point ID, including after a Spring Boot restart.
 - **REST APIs** — Upload resumes, retrieve candidate profiles, inspect chunks, and match resumes against job descriptions.
-- **In-Memory Storage** — Store resumes, profiles, chunks, and embeddings in application memory.
 
 ### Planned
 
-- PostgreSQL persistence using Spring Data JPA.
-- Persistent storage for resume chunks and embeddings.
-- LLM-powered candidate evaluation and skill-gap analysis.
-- Evidence-based explanations for candidate-job matches.
+- Remove redundant in-memory storage for data that is already persisted in Qdrant.
+- Deduplicate matching results at the candidate level and decide how to handle repeated uploads of the same resume.
+- Add a configurable similarity threshold and improve candidate-level ranking.
+- PostgreSQL persistence for resume metadata and other structured application data, if needed.
+- LLM-powered candidate evaluation, skill-gap analysis, and evidence-based explanations.
 
 ## Architecture
 
@@ -84,11 +86,14 @@ The project is being developed incrementally, starting with semantic matching an
 | API Style | REST |
 | Embedding Runtime | Ollama |
 | Embedding Model | `nomic-embed-text` |
-| Similarity Algorithm | Cosine similarity |
+| Similarity Algorithm | Qdrant cosine vector search |
 | Resume Input | PDF |
-| Current Storage | In-memory Java collections |
-| Planned Database | PostgreSQL |
-| Planned Persistence Layer | Spring Data JPA |
+| Vector Database | Qdrant |
+| Vector Database Client | `io.qdrant:client:1.15.0` |
+| Embedding Dimensions | 768 |
+| Embedding Storage | Qdrant `resume_chunks` collection |
+| Candidate Profile Storage | Qdrant `candidate_profiles` collection |
+| Additional Structured Database | PostgreSQL, optional/planned |
 | Planned LLM Integration | To be determined |
 
 ## Prerequisites
@@ -243,6 +248,26 @@ Example response structure:
 
 The values above are illustrative. Actual results depend on the uploaded resume and job description. Employment history and projects are not yet populated by the current simplified profile extractor.
 
+## Qdrant Setup
+
+The application connects to a locally running Qdrant instance using its gRPC port `6334`. The Qdrant dashboard/API is available on port `6333`.
+
+The current configuration expects Qdrant at `localhost:6334`. Ensure the Qdrant container is running before starting the Spring Boot application. The application initializes these collections if they do not exist:
+
+- `resume_chunks` — 768-dimensional vectors using cosine distance, with resume ID, chunk index, section, and chunk text in the payload.
+- `candidate_profiles` — 768-dimensional vectors using cosine distance, with the resume ID and serialized candidate profile in the payload. The profile is retrieved by a deterministic point ID.
+
+Example local Docker command, if you need to start Qdrant separately:
+
+```bash
+docker run -d --name qdrant \
+  -p 6333:6333 -p 6334:6334 \
+  -v qdrant_storage:/qdrant/storage \
+  qdrant/qdrant
+```
+
+If a container named `qdrant` already exists, start that existing container instead of creating another one.
+
 ## How Matching Works
 
 ### 1. Resume ingestion
@@ -263,71 +288,90 @@ Each resume chunk is passed to Ollama using the `nomic-embed-text` model to gene
 
 The job description is embedded using the same model.
 
-### 5. Similarity calculation
+### 5. Persistent vector storage
 
-The application computes cosine similarity between the job-description embedding and each resume-chunk embedding.
+The application stores each resume-chunk embedding and its payload in Qdrant's `resume_chunks` collection. Candidate profiles are serialized and stored in the `candidate_profiles` collection.
 
-Cosine similarity measures the directional similarity between two vectors. It is not a calibrated probability or a percentage indicating the likelihood that a candidate is qualified.
+### 6. Vector search and ranking
 
-### 6. Ranking
+The job-description embedding is sent to Qdrant, which returns the nearest resume chunks using cosine distance. Results include similarity scores and the chunk payload.
 
-Resume chunks are sorted by similarity score in descending order, and the highest-ranked results are returned.
+Cosine similarity is not a calibrated probability or a percentage indicating the likelihood that a candidate is qualified. The current endpoint ranks chunks, not unique candidates.
 
 ## Current Limitations
 
-- **In-memory storage:** Resumes and embeddings are lost when the application restarts.
+- **Partial in-memory state remains:** Resume objects, resume chunks, candidate profiles, and embedded chunks are still held in Java maps for some existing endpoints and workflows. Qdrant now persists vectors/chunk payloads and candidate profiles, but the application has not yet been fully refactored to treat Qdrant as the source of truth for all relevant reads.
+- **Duplicate uploads:** Uploading the same resume more than once creates different resume IDs and can produce duplicate-looking search results.
+- **Chunk-level ranking:** The matching implementation ranks chunks. It does not yet aggregate results into one ranked result per candidate.
+- **No configurable similarity threshold:** The endpoint can return weak matches unless a threshold is added.
 - **Heuristic profile extraction:** Extracted candidate information may be incomplete or inaccurate.
 - **Employment and project extraction:** These fields are not currently populated by the simplified profile extractor.
-- **Chunk-level ranking:** The current matching implementation ranks resume chunks rather than producing a comprehensive candidate-level score.
 - **No LLM evaluation yet:** The application does not currently generate natural-language assessments or explain why a candidate matches a job.
-- **No persistent database:** PostgreSQL integration is planned but not implemented.
+- **PostgreSQL not integrated:** Qdrant handles vector retrieval and profile payload storage; PostgreSQL remains optional/planned for structured metadata and relational queries.
 - **Similarity score interpretation:** Scores should not be treated as match percentages or definitive hiring recommendations.
 
 ## Roadmap
 
-### Phase 1: Semantic Resume Matching — Current
+### Phase 1: Semantic Resume Matching — Completed
 
 - [x] PDF text extraction
 - [x] Resume text normalization
 - [x] Resume chunking
 - [x] Candidate profile extraction
 - [x] Local embedding generation
-- [x] Cosine similarity calculation
+- [x] Qdrant vector search using cosine distance
 - [x] Ranked resume chunks
 - [x] REST API for resume matching
 
-### Phase 2: Database Persistence
+### Phase 2: Qdrant Vector Persistence — Implemented
 
-- [ ] Integrate PostgreSQL
-- [ ] Add JPA entities and repositories
-- [ ] Persist resumes and candidate profiles
-- [ ] Persist resume chunks and embeddings
-- [ ] Load stored embeddings for matching
-- [ ] Verify matching across application restarts
+- [x] Run Qdrant locally with persistent Docker volume
+- [x] Create `resume_chunks` collection (768 dimensions, cosine distance)
+- [x] Create `candidate_profiles` collection
+- [x] Persist resume-chunk vectors and payloads in Qdrant
+- [x] Persist serialized candidate profiles in Qdrant
+- [x] Query Qdrant for matching chunks instead of calculating similarity over the in-memory embedding list
+- [x] Retrieve candidate profiles from Qdrant by deterministic point ID
+- [x] Verify matching/profile retrieval after restarting Spring Boot
 
-### Phase 3: LLM-Powered Evaluation
+**Note:** This phase implements Qdrant persistence for vectors/chunks and candidate profiles. It does not mean every resume-related object or endpoint has been migrated off in-memory maps. PostgreSQL/JPA has not been implemented.
+
+### Phase 3: Remove Redundant In-Memory State and Improve Results — Next
+
+- [ ] Review `ResumeService` and identify which in-memory maps are still required by existing endpoints.
+- [ ] Stop using `embeddedChunks` as the source for matching; use Qdrant for vector retrieval.
+- [ ] Migrate profile reads used by matching to `QdrantVectorService.getCandidateProfile()`.
+- [ ] Decide whether resume metadata and original normalized text need durable storage; if so, choose Qdrant payloads or a structured database such as PostgreSQL.
+- [ ] Deduplicate results by `resumeId` where appropriate, while preserving the best-matching chunks for each resume.
+- [ ] Decide how repeated uploads of the same resume should behave (allow separate versions, detect duplicates, or update an existing resume).
+- [ ] Add a configurable minimum similarity score.
+- [ ] Aggregate chunk-level scores into a candidate-level ranking.
+- [ ] Test uploads, matching, and profile retrieval after application restarts.
+
+### Phase 4: LLM-Powered Evaluation
 
 - [ ] Integrate an LLM
 - [ ] Evaluate candidates against job requirements
 - [ ] Identify matching and missing skills
-- [ ] Generate evidence-based explanations
+- [ ] Generate evidence-based explanations grounded in resume text
 - [ ] Return structured evaluation results
 
-### Phase 4: Improved Matching
+### Phase 5: Matching Quality and Reliability
 
-- [ ] Aggregate chunk scores into candidate-level results
 - [ ] Improve employment history and project extraction
 - [ ] Evaluate matching quality using representative resumes and job descriptions
-- [ ] Add automated tests for parsing, embeddings, and matching
+- [ ] Add automated tests for parsing, embeddings, Qdrant persistence, and matching
+- [ ] Add error handling and operational checks for Qdrant and Ollama
 
 ## Development Philosophy
 
 The project follows an incremental approach:
 
 1. Build a working semantic matching pipeline.
-2. Introduce persistent storage without disrupting matching.
-3. Add LLM capabilities where they provide meaningful value.
-4. Evaluate matching quality before adding unnecessary complexity.
+2. Persist vectors, chunks, and candidate profiles in Qdrant without disrupting matching.
+3. Remove redundant in-memory state and make matching robust to duplicate uploads.
+4. Add LLM capabilities where they provide meaningful value.
+5. Evaluate matching quality before adding unnecessary complexity.
 
 The goal is to build a practical resume-matching system with a clear separation between document processing, embedding generation, retrieval, and candidate evaluation.
 

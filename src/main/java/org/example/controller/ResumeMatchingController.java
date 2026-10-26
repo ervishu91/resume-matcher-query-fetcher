@@ -23,7 +23,7 @@ public class ResumeMatchingController {
 
     @PostMapping("/match")
     public ResumeMatchResponse matchResume(
-            @RequestBody Map<String, Object> request) {
+            @RequestBody Map<String, Object> request) throws Exception {
 
         String jobDescription =
                 (String) request.get("jobDescription");

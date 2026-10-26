@@ -36,6 +36,8 @@ public class ResumeService {
     private final CandidateProfileExtractor candidateProfileExtractor;
 
     private final EmbeddingService  embeddingService;
+    private final QdrantVectorService qdrantVectorService;
+
 
     private final Map<String, CandidateProfile> candidateProfiles =
             new ConcurrentHashMap<>();
@@ -47,13 +49,14 @@ public class ResumeService {
             ResumeParser resumeParser,
             ResumeTextNormalizer textNormalizer,
             ResumeChunker resumeChunker,
-            CandidateProfileExtractor candidateProfileExtractor, EmbeddingService embeddingService) {
+            CandidateProfileExtractor candidateProfileExtractor, EmbeddingService embeddingService, QdrantVectorService qdrantVectorService) {
 
         this.resumeParser = resumeParser;
         this.textNormalizer = textNormalizer;
         this.resumeChunker = resumeChunker;
         this.candidateProfileExtractor = candidateProfileExtractor;
         this.embeddingService = embeddingService;
+        this.qdrantVectorService = qdrantVectorService;
     }
 
     public Resume uploadResume(MultipartFile file) throws IOException {
@@ -89,6 +92,21 @@ public class ResumeService {
                 candidateProfileExtractor.extract(id, normalizedText);
 
         candidateProfiles.put(id, profile);
+        try {
+            qdrantVectorService.saveCandidateProfile(profile);
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Failed to save candidate profile to Qdrant: " + id,
+                    e
+            );
+        }
+        System.out.println("PROFILE STORED: " + id);
+        System.out.println("PROFILE VALUE: " + profile);
+        System.out.println("ALL PROFILE IDS: " + candidateProfiles.keySet());
+
+        System.out.println("Stored candidate profile for resumeId: " + id);
+        System.out.println("Candidate profile: " + candidateProfiles.get(id));
+
         List<EmbeddedResumeChunk> embedded = chunks.stream()
                 .map(chunk -> new EmbeddedResumeChunk(
                         resume.getId(),
@@ -100,6 +118,18 @@ public class ResumeService {
                 .toList();
 
         embeddedChunks.put(resume.getId(), embedded);
+
+        for (EmbeddedResumeChunk chunk : embedded) {
+            try {
+                qdrantVectorService.saveChunk(chunk);
+            } catch (Exception e) {
+                throw new RuntimeException(
+                        "Failed to save resume chunk to Qdrant: "
+                                + chunk.getChunkIndex(),
+                        e
+                );
+            }
+        }
 
         return resume;
     }
@@ -116,6 +146,9 @@ public class ResumeService {
         return resumeChunks.getOrDefault(resumeId, List.of());
     }
     public Optional<CandidateProfile> getCandidateProfile(String resumeId) {
+        System.out.println("Looking up candidate profile for resumeId: " + resumeId);
+        System.out.println("Available profile IDs: " + candidateProfiles.keySet());
+
         return Optional.ofNullable(candidateProfiles.get(resumeId));
     }
     public List<EmbeddedResumeChunk> getEmbeddedChunks(String resumeId) {
