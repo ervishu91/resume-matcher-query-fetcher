@@ -332,5 +332,4 @@ The project follows an incremental approach:
 The goal is to build a practical resume-matching system with a clear separation between document processing, embedding generation, retrieval, and candidate evaluation.
 
 ## License
-
-Choose a license before publishing the repository publicly. No license has been specified for this project yet.
+--------------**---------
